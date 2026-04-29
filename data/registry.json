@@ -1,1 +1,18 @@
-
+{
+  "rows": [
+    {
+      "no": "1",
+      "device_id": "ESP32-0001",
+      "device_secret": "alpha-001",
+      "model": "relay-1ch",
+      "status": "available",
+      "assigned_to": "",
+      "device_name": "Gate Relay",
+      "device_ip": "172.20.10.7",
+      "http_token": "token-esp32-001",
+      "relay_state": "OFF",
+      "last_seen": "",
+      "registered_at": "2026-04-28"
+    }
+  ]
+}
