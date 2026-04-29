@@ -18,7 +18,7 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const API_BASE_URL = `${window.location.origin}/api`;
+const API_BASE_URL = "https://remote-control-backend-g7vf.onrender.com/api";
 
 const devices = [];
 let sessionToken = "";
