@@ -10,6 +10,7 @@ const WEB_ROOT = path.join(__dirname, "public");
 const DATA_FILE = path.join(__dirname, "data", "db.json");
 const SHEET_CACHE_FILE = path.join(__dirname, "data", "registry.json");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
+const DEVICE_ONLINE_WINDOW_MS = 45000;
 
 function ensureFile(filePath, fallbackContent) {
   const dir = path.dirname(filePath);
@@ -99,6 +100,10 @@ function parseBody(req) {
 
 function createSessionToken() {
   return `session_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function createCommandId() {
+  return `cmd_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -203,24 +208,116 @@ function serveStaticFile(reqUrl, res) {
   sendText(res, 200, fs.readFileSync(filePath), contentType);
 }
 
-async function forwardDeviceCommand(device, action) {
-  const response = await fetch(`http://${device.deviceIp}/api/${action}?token=${device.httpToken}`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    throw new Error(`ESP32 responded with status ${response.status}`);
+function computeOnline(entry) {
+  if (!entry.lastSeen) {
+    return false;
   }
 
-  return response.json();
+  const lastSeen = Date.parse(entry.lastSeen);
+  if (Number.isNaN(lastSeen)) {
+    return false;
+  }
+
+  return Date.now() - lastSeen <= DEVICE_ONLINE_WINDOW_MS;
 }
 
-async function fetchDeviceStatus(device) {
-  const response = await fetch(`http://${device.deviceIp}/api/status?token=${device.httpToken}`);
-  if (!response.ok) {
-    throw new Error(`ESP32 status failed with ${response.status}`);
+function normalizeUserDevice(entry) {
+  return {
+    ...entry,
+    deviceName: entry.deviceName || entry.deviceId,
+    relayState: entry.relayState || "OFF",
+    deviceIp: entry.deviceIp || "",
+    httpToken: entry.httpToken || "",
+    pendingCommand: entry.pendingCommand || "",
+    pendingCommandId: entry.pendingCommandId || "",
+    pendingCommandAt: entry.pendingCommandAt || "",
+    lastSeen: entry.lastSeen || "",
+    lastReportAt: entry.lastReportAt || "",
+    wifiConnected: entry.wifiConnected !== false,
+    setupMode: Boolean(entry.setupMode),
+  };
+}
+
+function publicDevice(entry) {
+  const device = normalizeUserDevice(entry);
+  return {
+    ...device,
+    online: computeOnline(device),
+  };
+}
+
+function updateDeviceEntries(db, deviceId, updater) {
+  let changed = false;
+  db.userDevices = db.userDevices.map((entry) => {
+    if (entry.deviceId !== deviceId) {
+      return entry;
+    }
+    changed = true;
+    return normalizeUserDevice(updater(normalizeUserDevice(entry)));
+  });
+  return changed;
+}
+
+function getDeviceStateForPolling(db, deviceId) {
+  const device = db.userDevices.find((entry) => entry.deviceId === deviceId);
+  if (!device) {
+    return {
+      relayState: "OFF",
+      pendingCommand: "",
+      pendingCommandId: "",
+    };
   }
-  return response.json();
+
+  const normalized = normalizeUserDevice(device);
+  return {
+    relayState: normalized.relayState,
+    pendingCommand: normalized.pendingCommand,
+    pendingCommandId: normalized.pendingCommandId,
+  };
+}
+
+function applyDeviceHeartbeat(db, payload) {
+  const nowIso = new Date().toISOString();
+  const relayState = payload.relay ? "ON" : "OFF";
+  const wifiConnected = payload.wifiConnected !== false;
+  const setupMode = Boolean(payload.setupMode);
+  const stationIp = payload.stationIp || "";
+  const ssid = payload.ssid || "";
+  const appliedCommandId = payload.appliedCommandId || "";
+  const action = payload.action || "";
+
+  updateDeviceEntries(db, payload.deviceId, (entry) => {
+    const next = {
+      ...entry,
+      relayState,
+      wifiConnected,
+      setupMode,
+      deviceIp: stationIp || entry.deviceIp || "",
+      ssid,
+      lastSeen: nowIso,
+      lastReportAt: nowIso,
+    };
+
+    if (appliedCommandId && entry.pendingCommandId === appliedCommandId) {
+      next.pendingCommand = "";
+      next.pendingCommandId = "";
+      next.pendingCommandAt = "";
+    }
+
+    return next;
+  });
+
+  db.commandLogs.push({
+    id: `heartbeat_${Date.now()}`,
+    type: "device-report",
+    deviceId: payload.deviceId,
+    action,
+    relayState,
+    wifiConnected,
+    stationIp,
+    createdAt: nowIso,
+    appliedCommandId,
+  });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -297,7 +394,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const devices = db.userDevices.filter((entry) => entry.userId === user.id);
+      const devices = db.userDevices
+        .filter((entry) => entry.userId === user.id)
+        .map(publicDevice);
       sendJson(res, 200, { devices });
       return;
     }
@@ -325,7 +424,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const userDevice = {
+      const userDevice = normalizeUserDevice({
         id: `user_device_${Date.now()}`,
         userId: user.id,
         deviceId: registryRow.device_id,
@@ -334,12 +433,19 @@ const server = http.createServer(async (req, res) => {
         deviceIp: registryRow.device_ip || "",
         httpToken: registryRow.http_token || "",
         relayState: registryRow.relay_state || "OFF",
+        pendingCommand: "",
+        pendingCommandId: "",
+        pendingCommandAt: "",
+        lastSeen: "",
+        lastReportAt: "",
+        wifiConnected: false,
+        setupMode: false,
         createdAt: new Date().toISOString(),
-      };
+      });
 
       db.userDevices.push(userDevice);
       writeJson(DATA_FILE, db);
-      sendJson(res, 201, { device: userDevice });
+      sendJson(res, 201, { device: publicDevice(userDevice) });
       return;
     }
 
@@ -360,29 +466,41 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      if (!device.deviceIp || !device.httpToken) {
-        sendJson(res, 400, { error: "Device IP or HTTP token is missing" });
-        return;
-      }
-
       const action = String(body.action || "").toLowerCase();
       if (!["on", "off", "toggle"].includes(action)) {
         sendJson(res, 400, { error: "Action must be on, off, or toggle" });
         return;
       }
 
-      const result = await forwardDeviceCommand(device, action);
-      device.relayState = result.relay ? "ON" : "OFF";
+      const commandId = createCommandId();
+      updateDeviceEntries(db, deviceId, (entry) => ({
+        ...entry,
+        pendingCommand: action,
+        pendingCommandId: commandId,
+        pendingCommandAt: new Date().toISOString(),
+      }));
+
       db.commandLogs.push({
         id: `log_${Date.now()}`,
+        type: "command-queued",
         userId: user.id,
-        deviceId: device.deviceId,
+        deviceId,
         action,
-        result,
+        commandId,
         createdAt: new Date().toISOString(),
       });
+
       writeJson(DATA_FILE, db);
-      sendJson(res, 200, { ok: true, result, device });
+      sendJson(res, 200, {
+        ok: true,
+        queued: true,
+        result: {
+          commandId,
+          action,
+          relay: normalizeUserDevice(device).relayState === "ON",
+          wifiConnected: computeOnline(device),
+        },
+      });
       return;
     }
 
@@ -402,10 +520,66 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const status = await fetchDeviceStatus(device);
-      device.relayState = status.relay ? "ON" : "OFF";
+      const normalized = publicDevice(device);
+      sendJson(res, 200, {
+        ok: true,
+        status: {
+          deviceId: normalized.deviceId,
+          relay: normalized.relayState === "ON",
+          wifiConnected: normalized.online,
+          lastSeen: normalized.lastSeen,
+          stationIp: normalized.deviceIp,
+          pendingCommand: normalized.pendingCommand,
+        },
+        device: normalized,
+      });
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/device/poll") {
+      const body = await parseBody(req);
+      const rows = await loadRegistryRows();
+      const registryRow = findRegistryRow(rows, body.deviceId, body.deviceSecret);
+      if (!registryRow) {
+        sendJson(res, 401, { error: "Device authentication failed" });
+        return;
+      }
+
+      const db = readJson(DATA_FILE);
+      updateDeviceEntries(db, body.deviceId, (entry) => ({
+        ...entry,
+        lastSeen: new Date().toISOString(),
+        deviceIp: body.stationIp || entry.deviceIp || "",
+        ssid: body.ssid || entry.ssid || "",
+        wifiConnected: body.wifiConnected !== false,
+        setupMode: Boolean(body.setupMode),
+      }));
       writeJson(DATA_FILE, db);
-      sendJson(res, 200, { ok: true, status, device });
+
+      const state = getDeviceStateForPolling(db, body.deviceId);
+      sendJson(res, 200, {
+        ok: true,
+        deviceId: body.deviceId,
+        commandId: state.pendingCommandId,
+        action: state.pendingCommand,
+        relay: state.relayState === "ON",
+      });
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/device/report") {
+      const body = await parseBody(req);
+      const rows = await loadRegistryRows();
+      const registryRow = findRegistryRow(rows, body.deviceId, body.deviceSecret);
+      if (!registryRow) {
+        sendJson(res, 401, { error: "Device authentication failed" });
+        return;
+      }
+
+      const db = readJson(DATA_FILE);
+      applyDeviceHeartbeat(db, body);
+      writeJson(DATA_FILE, db);
+      sendJson(res, 200, { ok: true });
       return;
     }
 
