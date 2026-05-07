@@ -1,4 +1,4 @@
-const loginForm = document.getElementById("loginForm");
+﻿const loginForm = document.getElementById("loginForm");
 const loginPanel = document.getElementById("loginPanel");
 const registerPanel = document.getElementById("registerPanel");
 const registerForm = document.getElementById("registerForm");
@@ -18,7 +18,10 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const API_BASE_URL = "https://remote-control-backend-g7vf.onrender.com/api";
+const API_BASE_URL =
+  window.location.protocol === "file:"
+    ? "http://192.168.1.118:8080/api"
+    : `${window.location.origin}/api`;
 
 const devices = [];
 let sessionToken = "";
@@ -82,6 +85,7 @@ async function fetchDeviceStatus(device) {
   const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/status`);
   device.relay = data.status.relay;
   device.online = data.status.wifiConnected;
+  device.ip = data.status.stationIp || device.ip;
 }
 
 function renderDevices() {
@@ -97,7 +101,7 @@ function renderDevices() {
     const toggleButton = node.querySelector(".btn-device-toggle");
 
     name.textContent = device.name;
-    meta.textContent = `${device.serial} • Relay ${device.relay ? "ON" : "OFF"} • ${device.ip || "-"}`;
+    meta.textContent = `${device.serial} | Relay ${device.relay ? "ON" : "OFF"} | ${device.ip || "-"}`;
     badge.textContent = device.online ? "Online" : "Offline";
     badge.classList.add(device.online ? "online" : "offline");
 
@@ -158,7 +162,7 @@ async function loadDevicesFromBackend() {
         id: index + 1,
         name: device.deviceName,
         serial: device.deviceId,
-        online: true,
+        online: Boolean(device.online),
         relay: device.relayState === "ON",
         ip: device.deviceIp,
       });
@@ -277,3 +281,4 @@ async function refreshLiveDevices() {
 }
 
 setInterval(refreshLiveDevices, 5000);
+
