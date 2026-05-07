@@ -18,10 +18,11 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const API_BASE_URL =
-  window.location.protocol === "file:"
-    ? "http://192.168.1.118:8080/api"
-    : `${window.location.origin}/api`;
+const BACKEND_ORIGIN =
+  window.location.port === "8080"
+    ? window.location.origin
+    : "http://171.4.46.228:8080";
+const API_BASE_URL = `${BACKEND_ORIGIN}/api`;
 
 const devices = [];
 let sessionToken = "";
