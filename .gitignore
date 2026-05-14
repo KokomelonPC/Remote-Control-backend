@@ -1,0 +1,5 @@
+runtime/
+node-v24.11.0-win-x64.zip
+node_modules/
+data/db.json
+*.log
