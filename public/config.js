@@ -1,0 +1,1 @@
+window.REMOTE_CONTROL_API_BASE_URL = "";

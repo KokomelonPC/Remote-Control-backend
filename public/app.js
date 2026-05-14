@@ -18,10 +18,12 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const BACKEND_ORIGIN =
-  window.location.port === "8080"
+const CONFIGURED_API_BASE_URL = window.REMOTE_CONTROL_API_BASE_URL || "";
+const BACKEND_ORIGIN = CONFIGURED_API_BASE_URL
+  ? CONFIGURED_API_BASE_URL.replace(/\/api\/?$/, "")
+  : window.location.port === "8080"
     ? window.location.origin
-    : "http://171.4.46.228:8080";
+    : "http://localhost:8080";
 const API_BASE_URL = `${BACKEND_ORIGIN}/api`;
 
 const devices = [];
