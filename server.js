@@ -3,6 +3,13 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 const crypto = require("crypto");
+let mqtt = null;
+
+try {
+  mqtt = require("mqtt");
+} catch (error) {
+  console.warn("MQTT package is not installed. Run npm install before using MQTT features.");
+}
 
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -11,6 +18,12 @@ const DATA_FILE = path.join(__dirname, "data", "db.json");
 const SHEET_CACHE_FILE = path.join(__dirname, "data", "registry.json");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
 const DEVICE_ONLINE_WINDOW_MS = 45000;
+const MQTT_HOST = process.env.MQTT_HOST || "3342e4fb3c864571b97185e91ef66377.s1.eu.hivemq.cloud";
+const MQTT_PORT = Number(process.env.MQTT_PORT || 8883);
+const MQTT_USERNAME = process.env.MQTT_USERNAME || "";
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD || "";
+const MQTT_ENABLED = Boolean(mqtt && MQTT_HOST && MQTT_USERNAME && MQTT_PASSWORD);
+let mqttClient = null;
 
 function ensureFile(filePath, fallbackContent) {
   const dir = path.dirname(filePath);
@@ -320,6 +333,120 @@ function applyDeviceHeartbeat(db, payload) {
   });
 }
 
+function commandTopic(deviceId) {
+  return `devices/${deviceId}/commands`;
+}
+
+function stateTopicFilter() {
+  return "devices/+/state";
+}
+
+function availabilityTopicFilter() {
+  return "devices/+/availability";
+}
+
+function publishMqttCommand(deviceId, commandId, action) {
+  if (!mqttClient || !mqttClient.connected) {
+    return false;
+  }
+
+  const payload = JSON.stringify({
+    commandId,
+    action,
+    expiresAt: Date.now() + 30000,
+  });
+
+  mqttClient.publish(commandTopic(deviceId), payload, { qos: 1 }, (error) => {
+    if (error) {
+      console.error("MQTT command publish failed:", error.message);
+    }
+  });
+  return true;
+}
+
+async function handleMqttStateMessage(topic, message) {
+  let payload;
+  try {
+    payload = JSON.parse(message.toString());
+  } catch (error) {
+    console.warn("MQTT state ignored: invalid JSON");
+    return;
+  }
+
+  const rows = await loadRegistryRows();
+  const registryRow = findRegistryRow(rows, payload.deviceId, payload.deviceSecret);
+  if (!registryRow) {
+    console.warn(`MQTT state ignored: auth failed for ${payload.deviceId || "unknown device"}`);
+    return;
+  }
+
+  const db = readJson(DATA_FILE);
+  applyDeviceHeartbeat(db, payload);
+  writeJson(DATA_FILE, db);
+}
+
+async function handleMqttAvailabilityMessage(topic, message) {
+  const deviceId = topic.split("/")[1];
+  let payload = {};
+  try {
+    payload = JSON.parse(message.toString());
+  } catch (error) {
+    payload = { online: message.toString() === "online" };
+  }
+
+  const db = readJson(DATA_FILE);
+  const nowIso = new Date().toISOString();
+  updateDeviceEntries(db, deviceId, (entry) => ({
+    ...entry,
+    wifiConnected: Boolean(payload.online),
+    lastSeen: payload.online ? nowIso : entry.lastSeen,
+  }));
+  writeJson(DATA_FILE, db);
+}
+
+function startMqttBridge() {
+  if (!MQTT_ENABLED) {
+    console.warn("MQTT bridge is disabled because configuration is incomplete.");
+    return;
+  }
+
+  mqttClient = mqtt.connect(`mqtts://${MQTT_HOST}:${MQTT_PORT}`, {
+    username: MQTT_USERNAME,
+    password: MQTT_PASSWORD,
+    clientId: `remote-control-backend-${crypto.randomBytes(4).toString("hex")}`,
+    clean: true,
+    reconnectPeriod: 5000,
+  });
+
+  mqttClient.on("connect", () => {
+    console.log(`MQTT bridge connected to ${MQTT_HOST}:${MQTT_PORT}`);
+    mqttClient.subscribe([stateTopicFilter(), availabilityTopicFilter()], { qos: 1 }, (error) => {
+      if (error) {
+        console.error("MQTT subscribe failed:", error.message);
+      }
+    });
+  });
+
+  mqttClient.on("message", (topic, message) => {
+    if (topic.endsWith("/state")) {
+      handleMqttStateMessage(topic, message).catch((error) => {
+        console.error("MQTT state handler failed:", error.message);
+      });
+      return;
+    }
+
+    if (topic.endsWith("/availability")) {
+      handleMqttAvailabilityMessage(topic, message).catch((error) => {
+        console.error("MQTT availability handler failed:", error.message);
+      });
+    }
+  });
+
+  mqttClient.on("error", (error) => {
+    console.error("MQTT bridge error:", error.message);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
 
@@ -473,6 +600,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const commandId = createCommandId();
+      const mqttPublished = publishMqttCommand(deviceId, commandId, action);
       updateDeviceEntries(db, deviceId, (entry) => ({
         ...entry,
         pendingCommand: action,
@@ -487,6 +615,8 @@ const server = http.createServer(async (req, res) => {
         deviceId,
         action,
         commandId,
+        mqttPublished,
+        expiresAt: new Date(Date.now() + 30000).toISOString(),
         createdAt: new Date().toISOString(),
       });
 
@@ -494,6 +624,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         queued: true,
+        mqttPublished,
         result: {
           commandId,
           action,
@@ -598,3 +729,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Remote control backend listening on http://${HOST}:${PORT}`);
 });
+
+startMqttBridge();
