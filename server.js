@@ -23,6 +23,9 @@ const MQTT_PORT = Number(process.env.MQTT_PORT || 8883);
 const MQTT_USERNAME = process.env.MQTT_USERNAME || "";
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || "";
 const MQTT_ENABLED = Boolean(mqtt && MQTT_HOST && MQTT_USERNAME && MQTT_PASSWORD);
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "myshop-c3983";
+const FIREBASE_CERT_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+let firebaseCertCache = { expiresAt: 0, certs: {} };
 let mqttClient = null;
 
 function ensureFile(filePath, fallbackContent) {
@@ -134,7 +137,118 @@ function verifyPassword(password, storedHash) {
   return crypto.timingSafeEqual(Buffer.from(originalHash, "hex"), Buffer.from(passwordHash, "hex"));
 }
 
-function getAuthUser(req, db) {
+function base64UrlToBuffer(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+  return Buffer.from(padded, "base64");
+}
+
+function base64UrlToJson(value) {
+  return JSON.parse(base64UrlToBuffer(value).toString("utf8"));
+}
+
+async function getFirebaseCerts() {
+  if (firebaseCertCache.expiresAt > Date.now()) {
+    return firebaseCertCache.certs;
+  }
+
+  const response = await fetch(FIREBASE_CERT_URL);
+  if (!response.ok) {
+    throw new Error(`Firebase cert fetch failed with status ${response.status}`);
+  }
+
+  const cacheControl = response.headers.get("cache-control") || "";
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/);
+  const maxAgeMs = maxAgeMatch ? Number(maxAgeMatch[1]) * 1000 : 60 * 60 * 1000;
+  const certs = await response.json();
+  firebaseCertCache = {
+    certs,
+    expiresAt: Date.now() + maxAgeMs - 60000,
+  };
+  return certs;
+}
+
+async function verifyFirebaseIdToken(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = base64UrlToJson(encodedHeader);
+  const payload = base64UrlToJson(encodedPayload);
+
+  if (header.alg !== "RS256" || !header.kid) {
+    return null;
+  }
+
+  const certs = await getFirebaseCerts();
+  const cert = certs[header.kid];
+  if (!cert) {
+    return null;
+  }
+
+  const verifier = crypto.createVerify("RSA-SHA256");
+  verifier.update(`${encodedHeader}.${encodedPayload}`);
+  verifier.end();
+  const validSignature = verifier.verify(cert, base64UrlToBuffer(encodedSignature));
+  if (!validSignature) {
+    return null;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.aud !== FIREBASE_PROJECT_ID || payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
+    return null;
+  }
+  if (!payload.sub || payload.exp <= now || payload.iat > now + 300) {
+    return null;
+  }
+
+  return payload;
+}
+
+function upsertFirebaseUser(db, firebaseUser) {
+  const email = String(firebaseUser.email || "").toLowerCase();
+  let user = db.users.find((entry) => entry.firebaseUid === firebaseUser.sub);
+
+  if (!user && email) {
+    user = db.users.find((entry) => String(entry.email || "").toLowerCase() === email);
+  }
+
+  if (user) {
+    let changed = false;
+    if (user.firebaseUid !== firebaseUser.sub) {
+      user.firebaseUid = firebaseUser.sub;
+      changed = true;
+    }
+    if (!user.authProvider) {
+      user.authProvider = "firebase";
+      changed = true;
+    }
+    if (firebaseUser.name && user.displayName !== firebaseUser.name) {
+      user.displayName = firebaseUser.name;
+      changed = true;
+    }
+    if (changed) {
+      writeJson(DATA_FILE, db);
+    }
+    return user;
+  }
+
+  user = {
+    id: `firebase_${firebaseUser.sub}`,
+    firebaseUid: firebaseUser.sub,
+    authProvider: "firebase",
+    displayName: firebaseUser.name || email || "Firebase User",
+    email,
+    createdAt: new Date().toISOString(),
+  };
+  db.users.push(user);
+  writeJson(DATA_FILE, db);
+  return user;
+}
+
+async function getAuthUser(req, db) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!token) {
@@ -142,11 +256,17 @@ function getAuthUser(req, db) {
   }
 
   const session = db.sessions.find((entry) => entry.token === token);
-  if (!session) {
-    return null;
+  if (session) {
+    return db.users.find((user) => user.id === session.userId) || null;
   }
 
-  return db.users.find((user) => user.id === session.userId) || null;
+  try {
+    const firebaseUser = await verifyFirebaseIdToken(token);
+    return firebaseUser ? upsertFirebaseUser(db, firebaseUser) : null;
+  } catch (error) {
+    console.warn("Firebase auth failed:", error.message);
+    return null;
+  }
 }
 
 function parseCsv(csvText) {
@@ -515,7 +635,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && requestUrl.pathname === "/api/devices") {
       const db = readJson(DATA_FILE);
-      const user = getAuthUser(req, db);
+      const user = await getAuthUser(req, db);
       if (!user) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
@@ -531,7 +651,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && requestUrl.pathname === "/api/devices/add") {
       const body = await parseBody(req);
       const db = readJson(DATA_FILE);
-      const user = getAuthUser(req, db);
+      const user = await getAuthUser(req, db);
       if (!user) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
@@ -578,7 +698,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && requestUrl.pathname.match(/^\/api\/devices\/[^/]+\/command$/)) {
       const db = readJson(DATA_FILE);
-      const user = getAuthUser(req, db);
+      const user = await getAuthUser(req, db);
       if (!user) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
@@ -637,7 +757,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && requestUrl.pathname.match(/^\/api\/devices\/[^/]+\/status$/)) {
       const db = readJson(DATA_FILE);
-      const user = getAuthUser(req, db);
+      const user = await getAuthUser(req, db);
       if (!user) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
