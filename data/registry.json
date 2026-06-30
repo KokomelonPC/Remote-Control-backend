@@ -14,5 +14,19 @@
       "last_seen": "",
       "registered_at": "2026-04-28"
     }
+    {
+  "no": "2",
+  "device_id": "ESP32-0002",
+  "device_secret": "alpha-002",
+  "model": "relay-1ch",
+  "status": "available",
+  "assigned_to": "",
+  "device_name": "Relay 2",
+  "device_ip": "",
+  "http_token": "token-esp32-002",
+  "relay_state": "OFF",
+  "last_seen": "",
+  "registered_at": "2026-06-30"
+}
   ]
 }
