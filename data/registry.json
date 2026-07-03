@@ -27,6 +27,20 @@
       "relay_state": "OFF",
       "last_seen": "",
       "registered_at": "2026-06-30"
+    },
+    {
+      "no": "3",
+      "device_id": "ESP32-0003",
+      "device_secret": "alpha-003",
+      "model": "relay-1ch",
+      "status": "available",
+      "assigned_to": "",
+      "device_name": "Relay 3",
+      "device_ip": "",
+      "http_token": "token-esp32-003",
+      "relay_state": "OFF",
+      "last_seen": "",
+      "registered_at": "2026-07-03"
     }
   ]
 }
