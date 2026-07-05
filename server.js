@@ -17,6 +17,7 @@ const WEB_ROOT = path.join(__dirname, "public");
 const DATA_FILE = path.join(__dirname, "data", "db.json");
 const SHEET_CACHE_FILE = path.join(__dirname, "data", "registry.json");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
+const REMOTE_SHEET_API_URL = process.env.REMOTE_SHEET_API_URL || "";
 const DEVICE_ONLINE_WINDOW_MS = 45000;
 const MQTT_HOST = process.env.MQTT_HOST || "3342e4fb3c864571b97185e91ef66377.s1.eu.hivemq.cloud";
 const MQTT_PORT = Number(process.env.MQTT_PORT || 8883);
@@ -379,6 +380,112 @@ function publicDevice(entry) {
   };
 }
 
+function userSheetIdentity(user) {
+  return {
+    userId: user.id || "",
+    firebaseUid: user.firebaseUid || "",
+    email: user.email || "",
+  };
+}
+
+function normalizeSheetDevice(user, entry) {
+  return normalizeUserDevice({
+    id: entry.id || `sheet_device_${entry.deviceId || Date.now()}`,
+    userId: user.id,
+    deviceId: entry.deviceId || entry.device_id || "",
+    deviceName: entry.deviceName || entry.device_name || entry.deviceId || entry.device_id || "",
+    model: entry.model || "",
+    deviceIp: entry.deviceIp || entry.device_ip || "",
+    httpToken: entry.httpToken || entry.http_token || "",
+    relayState: entry.relayState || entry.relay_state || "OFF",
+    pendingCommand: entry.pendingCommand || "",
+    pendingCommandId: entry.pendingCommandId || "",
+    pendingCommandAt: entry.pendingCommandAt || "",
+    lastSeen: entry.lastSeen || "",
+    lastReportAt: entry.lastReportAt || "",
+    wifiConnected: entry.wifiConnected !== false && String(entry.wifiConnected || "true") !== "false",
+    setupMode: entry.setupMode === true || String(entry.setupMode || "").toLowerCase() === "true",
+    ssid: entry.ssid || "",
+    createdAt: entry.createdAt || new Date().toISOString(),
+  });
+}
+
+function syncUserDevicesToLocalDb(db, user, sheetDevices) {
+  let changed = false;
+  const nextDevices = sheetDevices.map((device) => normalizeSheetDevice(user, device)).filter((device) => device.deviceId);
+
+  nextDevices.forEach((sheetDevice) => {
+    const existingIndex = db.userDevices.findIndex(
+      (entry) => entry.userId === user.id && entry.deviceId === sheetDevice.deviceId
+    );
+    if (existingIndex >= 0) {
+      db.userDevices[existingIndex] = normalizeUserDevice({
+        ...db.userDevices[existingIndex],
+        ...sheetDevice,
+        id: db.userDevices[existingIndex].id,
+        userId: user.id,
+      });
+    } else {
+      db.userDevices.push(sheetDevice);
+    }
+    changed = true;
+  });
+
+  return changed;
+}
+
+async function callRemoteSheet(payload) {
+  if (!REMOTE_SHEET_API_URL) {
+    return null;
+  }
+
+  const response = await fetch(REMOTE_SHEET_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === false) {
+    throw new Error(data.message || `Remote sheet request failed: ${response.status}`);
+  }
+  return data;
+}
+
+async function loadUserDevicesFromRemoteSheet(user) {
+  if (!REMOTE_SHEET_API_URL) {
+    return null;
+  }
+
+  const data = await callRemoteSheet({
+    action: "getRemoteUserDevices",
+    ...userSheetIdentity(user),
+  });
+  return Array.isArray(data.devices) ? data.devices : [];
+}
+
+async function saveUserDeviceToRemoteSheet(user, device) {
+  if (!REMOTE_SHEET_API_URL) {
+    return;
+  }
+
+  await callRemoteSheet({
+    action: "saveRemoteUserDevice",
+    ...userSheetIdentity(user),
+    device,
+  });
+}
+
+async function updateRemoteSheetDeviceState(device) {
+  if (!REMOTE_SHEET_API_URL) {
+    return;
+  }
+
+  await callRemoteSheet({
+    action: "updateRemoteDeviceState",
+    device,
+  });
+}
+
 function updateDeviceEntries(db, deviceId, updater) {
   let changed = false;
   db.userDevices = db.userDevices.map((entry) => {
@@ -641,6 +748,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      try {
+        const sheetDevices = await loadUserDevicesFromRemoteSheet(user);
+        if (sheetDevices) {
+          const changed = syncUserDevicesToLocalDb(db, user, sheetDevices);
+          if (changed) {
+            writeJson(DATA_FILE, db);
+          }
+        }
+      } catch (error) {
+        console.warn("Remote device sheet load failed:", error.message);
+      }
+
       const devices = db.userDevices
         .filter((entry) => entry.userId === user.id)
         .map(publicDevice);
@@ -692,6 +811,11 @@ const server = http.createServer(async (req, res) => {
 
       db.userDevices.push(userDevice);
       writeJson(DATA_FILE, db);
+      try {
+        await saveUserDeviceToRemoteSheet(user, userDevice);
+      } catch (error) {
+        console.warn("Remote device sheet save failed:", error.message);
+      }
       sendJson(res, 201, { device: publicDevice(userDevice) });
       return;
     }
@@ -806,6 +930,18 @@ const server = http.createServer(async (req, res) => {
         setupMode: Boolean(body.setupMode),
       }));
       writeJson(DATA_FILE, db);
+      try {
+        await updateRemoteSheetDeviceState({
+          deviceId: body.deviceId,
+          deviceIp: body.stationIp || "",
+          ssid: body.ssid || "",
+          wifiConnected: body.wifiConnected !== false,
+          setupMode: Boolean(body.setupMode),
+          lastSeen: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.warn("Remote device sheet poll update failed:", error.message);
+      }
 
       const state = getDeviceStateForPolling(db, body.deviceId);
       sendJson(res, 200, {
@@ -830,6 +966,20 @@ const server = http.createServer(async (req, res) => {
       const db = readJson(DATA_FILE);
       applyDeviceHeartbeat(db, body);
       writeJson(DATA_FILE, db);
+      try {
+        await updateRemoteSheetDeviceState({
+          deviceId: body.deviceId,
+          deviceIp: body.stationIp || "",
+          ssid: body.ssid || "",
+          relayState: body.relay ? "ON" : "OFF",
+          wifiConnected: body.wifiConnected !== false,
+          setupMode: Boolean(body.setupMode),
+          lastSeen: new Date().toISOString(),
+          lastReportAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.warn("Remote device sheet report update failed:", error.message);
+      }
       sendJson(res, 200, { ok: true });
       return;
     }

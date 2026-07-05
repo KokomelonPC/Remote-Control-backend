@@ -16,3 +16,5 @@ services:
         sync: false
       - key: SHEET_CSV_URL
         sync: false
+      - key: REMOTE_SHEET_API_URL
+        value: https://script.google.com/macros/s/AKfycbzzFLMKiPR-b4AY50GurldAaP16qzThDEqWUyLlytVhHPHyQhfYmurTQgW1I_2UPJH1kA/exec
