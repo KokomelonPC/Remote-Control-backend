@@ -786,6 +786,18 @@ const server = http.createServer(async (req, res) => {
 
       const exists = db.userDevices.find((entry) => entry.deviceId === body.deviceId);
       if (exists) {
+        if (exists.userId === user.id) {
+          try {
+            await saveUserDeviceToRemoteSheet(user, normalizeUserDevice({
+              ...exists,
+              deviceName: body.deviceName || exists.deviceName || registryRow.device_name || registryRow.device_id,
+            }));
+          } catch (error) {
+            console.warn("Remote device sheet save failed:", error.message);
+          }
+          sendJson(res, 200, { device: publicDevice(exists), alreadyAssigned: true });
+          return;
+        }
         sendJson(res, 409, { error: "Device is already assigned in backend storage" });
         return;
       }
