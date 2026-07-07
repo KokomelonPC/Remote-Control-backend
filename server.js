@@ -715,7 +715,13 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === "GET" && requestUrl.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, service: "remote-control-backend" });
+      sendJson(res, 200, {
+        ok: true,
+        service: "remote-control-backend",
+        mqttEnabled: MQTT_ENABLED,
+        mqttConnected: Boolean(mqttClient && mqttClient.connected),
+        remoteSheetConfigured: Boolean(REMOTE_SHEET_API_URL),
+      });
       return;
     }
 
@@ -915,11 +921,19 @@ const server = http.createServer(async (req, res) => {
 
       const commandId = createCommandId();
       const mqttPublished = publishMqttCommand(deviceId, commandId, action);
+      const nowIso = new Date().toISOString();
+      const previousRelayState = normalizeUserDevice(device).relayState;
+      const optimisticRelayState =
+        action === "on" ? "ON" : action === "off" ? "OFF" : previousRelayState === "ON" ? "OFF" : "ON";
       updateDeviceEntries(db, deviceId, (entry) => ({
         ...entry,
+        relayState: mqttPublished ? optimisticRelayState : entry.relayState,
+        wifiConnected: mqttPublished ? true : entry.wifiConnected,
+        lastSeen: mqttPublished ? nowIso : entry.lastSeen,
+        lastReportAt: mqttPublished ? nowIso : entry.lastReportAt,
         pendingCommand: action,
         pendingCommandId: commandId,
-        pendingCommandAt: new Date().toISOString(),
+        pendingCommandAt: nowIso,
       }));
 
       db.commandLogs.push({
@@ -931,16 +945,20 @@ const server = http.createServer(async (req, res) => {
         commandId,
         mqttPublished,
         expiresAt: new Date(Date.now() + 30000).toISOString(),
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       });
 
       writeJson(DATA_FILE, db);
       try {
         await updateRemoteSheetDeviceState({
           deviceId,
+          relayState: mqttPublished ? optimisticRelayState : undefined,
+          wifiConnected: mqttPublished ? true : undefined,
+          lastSeen: mqttPublished ? nowIso : undefined,
+          lastReportAt: mqttPublished ? nowIso : undefined,
           pendingCommand: action,
           pendingCommandId: commandId,
-          pendingCommandAt: new Date().toISOString(),
+          pendingCommandAt: nowIso,
         });
       } catch (error) {
         console.warn("Remote device sheet command update failed:", error.message);
