@@ -618,6 +618,20 @@ async function handleMqttStateMessage(topic, message) {
   const db = readJson(DATA_FILE);
   applyDeviceHeartbeat(db, payload);
   writeJson(DATA_FILE, db);
+  try {
+    await updateRemoteSheetDeviceState({
+      deviceId: payload.deviceId,
+      deviceIp: payload.stationIp || "",
+      ssid: payload.ssid || "",
+      relayState: payload.relay ? "ON" : "OFF",
+      wifiConnected: payload.wifiConnected !== false,
+      setupMode: Boolean(payload.setupMode),
+      lastSeen: new Date().toISOString(),
+      lastReportAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn("Remote device sheet MQTT state update failed:", error.message);
+  }
 }
 
 async function handleMqttAvailabilityMessage(topic, message) {
@@ -637,6 +651,15 @@ async function handleMqttAvailabilityMessage(topic, message) {
     lastSeen: payload.online ? nowIso : entry.lastSeen,
   }));
   writeJson(DATA_FILE, db);
+  try {
+    await updateRemoteSheetDeviceState({
+      deviceId,
+      wifiConnected: Boolean(payload.online),
+      lastSeen: payload.online ? nowIso : "",
+    });
+  } catch (error) {
+    console.warn("Remote device sheet MQTT availability update failed:", error.message);
+  }
 }
 
 function startMqttBridge() {
