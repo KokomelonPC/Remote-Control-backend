@@ -410,6 +410,14 @@ function normalizeSheetDevice(user, entry) {
   });
 }
 
+function requestIdentityMatchesUser(body, user) {
+  const requestEmail = String(body.ownerEmail || body.email || "").trim().toLowerCase();
+  const requestUid = String(body.firebaseUid || body.uid || "").trim();
+  const userEmail = String(user.email || "").trim().toLowerCase();
+  const userUid = String(user.firebaseUid || "").trim();
+  return (!requestEmail || requestEmail === userEmail) && (!requestUid || requestUid === userUid);
+}
+
 function syncUserDevicesToLocalDb(db, user, sheetDevices) {
   let changed = false;
   const nextDevices = sheetDevices.map((device) => normalizeSheetDevice(user, device)).filter((device) => device.deviceId);
@@ -851,7 +859,12 @@ const server = http.createServer(async (req, res) => {
 
       if (!device) {
         try {
-          const sheetDevices = await loadUserDevicesFromRemoteSheet(user);
+          const lookupUser = {
+            ...user,
+            email: requestIdentityMatchesUser(body, user) ? (body.ownerEmail || user.email || "") : (user.email || ""),
+            firebaseUid: requestIdentityMatchesUser(body, user) ? (body.firebaseUid || user.firebaseUid || "") : (user.firebaseUid || ""),
+          };
+          const sheetDevices = await loadUserDevicesFromRemoteSheet(lookupUser);
           if (sheetDevices) {
             syncUserDevicesToLocalDb(db, user, sheetDevices);
             device = db.userDevices.find((entry) => entry.userId === user.id && entry.deviceId === deviceId);
@@ -859,6 +872,11 @@ const server = http.createServer(async (req, res) => {
         } catch (error) {
           console.warn("Remote device sheet command lookup failed:", error.message);
         }
+      }
+
+      if (!device && requestIdentityMatchesUser(body, user) && body.deviceSnapshot && body.deviceSnapshot.deviceId === deviceId) {
+        device = normalizeSheetDevice(user, body.deviceSnapshot);
+        db.userDevices.push(device);
       }
 
       if (!device) {
