@@ -751,10 +751,15 @@ const server = http.createServer(async (req, res) => {
       try {
         const sheetDevices = await loadUserDevicesFromRemoteSheet(user);
         if (sheetDevices) {
+          const sheetUserDevices = sheetDevices
+            .map((device) => normalizeSheetDevice(user, device))
+            .filter((device) => device.deviceId);
           const changed = syncUserDevicesToLocalDb(db, user, sheetDevices);
           if (changed) {
             writeJson(DATA_FILE, db);
           }
+          sendJson(res, 200, { devices: sheetUserDevices.map(publicDevice), source: "sheet" });
+          return;
         }
       } catch (error) {
         console.warn("Remote device sheet load failed:", error.message);
@@ -842,7 +847,19 @@ const server = http.createServer(async (req, res) => {
 
       const body = await parseBody(req);
       const deviceId = decodeURIComponent(requestUrl.pathname.split("/")[3]);
-      const device = db.userDevices.find((entry) => entry.userId === user.id && entry.deviceId === deviceId);
+      let device = db.userDevices.find((entry) => entry.userId === user.id && entry.deviceId === deviceId);
+
+      if (!device) {
+        try {
+          const sheetDevices = await loadUserDevicesFromRemoteSheet(user);
+          if (sheetDevices) {
+            syncUserDevicesToLocalDb(db, user, sheetDevices);
+            device = db.userDevices.find((entry) => entry.userId === user.id && entry.deviceId === deviceId);
+          }
+        } catch (error) {
+          console.warn("Remote device sheet command lookup failed:", error.message);
+        }
+      }
 
       if (!device) {
         sendJson(res, 404, { error: "Device not found in this account" });
@@ -877,6 +894,16 @@ const server = http.createServer(async (req, res) => {
       });
 
       writeJson(DATA_FILE, db);
+      try {
+        await updateRemoteSheetDeviceState({
+          deviceId,
+          pendingCommand: action,
+          pendingCommandId: commandId,
+          pendingCommandAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.warn("Remote device sheet command update failed:", error.message);
+      }
       sendJson(res, 200, {
         ok: true,
         queued: true,
