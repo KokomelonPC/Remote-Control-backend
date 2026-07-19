@@ -44,6 +44,7 @@ ensureFile(DATA_FILE, {
   sessions: [],
   userDevices: [],
   commandLogs: [],
+  scheduleLogs: [],
 });
 
 ensureFile(SHEET_CACHE_FILE, {
@@ -355,10 +356,48 @@ function computeOnline(entry) {
   return Date.now() - lastSeen <= DEVICE_ONLINE_WINDOW_MS;
 }
 
+function normalizeSchedule(value) {
+  if (value && typeof value === "object") {
+    return {
+      enabled: Boolean(value.enabled),
+      onTime: String(value.onTime || "").slice(0, 5),
+      offTime: String(value.offTime || "").slice(0, 5),
+      days: ["daily", "weekdays", "weekends"].includes(value.days) ? value.days : "daily",
+      timezone: value.timezone || "Asia/Bangkok",
+      lastRunKey: value.lastRunKey || "",
+    };
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      return normalizeSchedule(JSON.parse(value));
+    } catch (error) {}
+  }
+  return { enabled: false, onTime: "", offTime: "", days: "daily", timezone: "Asia/Bangkok", lastRunKey: "" };
+}
+
+function inferDeviceType(entry) {
+  const rawType = String(entry.deviceType || entry.device_type || "").trim();
+  if (rawType) return rawType;
+  const model = String(entry.model || "").toLowerCase();
+  if (model.includes("temp")) return "temperature-sensor";
+  if (model.includes("humid")) return "humidity-sensor";
+  if (model.includes("turbid") || model.includes("water")) return "water-quality-sensor";
+  return "switch";
+}
+
 function normalizeUserDevice(entry) {
+  const schedule = normalizeSchedule(entry.schedule || {
+    enabled: entry.scheduleEnabled,
+    onTime: entry.scheduleOnTime,
+    offTime: entry.scheduleOffTime,
+    days: entry.scheduleDays,
+    timezone: entry.scheduleTimezone,
+    lastRunKey: entry.scheduleLastRunKey,
+  });
   return {
     ...entry,
     deviceName: entry.deviceName || entry.deviceId,
+    deviceType: inferDeviceType(entry),
     relayState: entry.relayState || "OFF",
     deviceIp: entry.deviceIp || "",
     httpToken: entry.httpToken || "",
@@ -369,6 +408,13 @@ function normalizeUserDevice(entry) {
     lastReportAt: entry.lastReportAt || "",
     wifiConnected: entry.wifiConnected !== false,
     setupMode: Boolean(entry.setupMode),
+    schedule,
+    scheduleEnabled: schedule.enabled,
+    scheduleOnTime: schedule.onTime,
+    scheduleOffTime: schedule.offTime,
+    scheduleDays: schedule.days,
+    scheduleTimezone: schedule.timezone,
+    scheduleLastRunKey: schedule.lastRunKey,
   };
 }
 
@@ -395,6 +441,7 @@ function normalizeSheetDevice(user, entry) {
     deviceId: entry.deviceId || entry.device_id || "",
     deviceName: entry.deviceName || entry.device_name || entry.deviceId || entry.device_id || "",
     model: entry.model || "",
+    deviceType: entry.deviceType || entry.device_type || "",
     deviceIp: entry.deviceIp || entry.device_ip || "",
     httpToken: entry.httpToken || entry.http_token || "",
     relayState: entry.relayState || entry.relay_state || "OFF",
@@ -406,6 +453,13 @@ function normalizeSheetDevice(user, entry) {
     wifiConnected: entry.wifiConnected !== false && String(entry.wifiConnected || "true") !== "false",
     setupMode: entry.setupMode === true || String(entry.setupMode || "").toLowerCase() === "true",
     ssid: entry.ssid || "",
+    schedule: entry.schedule || "",
+    scheduleEnabled: entry.scheduleEnabled || entry.schedule_enabled || "",
+    scheduleOnTime: entry.scheduleOnTime || entry.schedule_on_time || "",
+    scheduleOffTime: entry.scheduleOffTime || entry.schedule_off_time || "",
+    scheduleDays: entry.scheduleDays || entry.schedule_days || "",
+    scheduleTimezone: entry.scheduleTimezone || entry.schedule_timezone || "Asia/Bangkok",
+    scheduleLastRunKey: entry.scheduleLastRunKey || entry.schedule_last_run_key || "",
     createdAt: entry.createdAt || new Date().toISOString(),
   });
 }
@@ -504,6 +558,78 @@ function updateDeviceEntries(db, deviceId, updater) {
     return normalizeUserDevice(updater(normalizeUserDevice(entry)));
   });
   return changed;
+}
+
+function saveScheduleForDevice(db, user, deviceId, schedule, snapshot) {
+  let device = db.userDevices.find((entry) => entry.userId === user.id && entry.deviceId === deviceId);
+  if (!device && snapshot && snapshot.deviceId === deviceId) {
+    device = normalizeSheetDevice(user, snapshot);
+    db.userDevices.push(device);
+  }
+  if (!device) return null;
+  const normalizedSchedule = normalizeSchedule(schedule);
+  updateDeviceEntries(db, deviceId, (entry) => ({ ...entry, schedule: normalizedSchedule }));
+  return normalizedSchedule;
+}
+
+function dayMatchesSchedule(date, days) {
+  const day = date.getDay();
+  if (days === "weekdays") return day >= 1 && day <= 5;
+  if (days === "weekends") return day === 0 || day === 6;
+  return true;
+}
+
+function queueScheduledCommand(db, device, action, nowIso, runKey) {
+  const commandId = createCommandId();
+  const mqttPublished = publishMqttCommand(device.deviceId, commandId, action);
+  const previousRelayState = normalizeUserDevice(device).relayState;
+  const optimisticRelayState = action === "on" ? "ON" : action === "off" ? "OFF" : previousRelayState;
+  updateDeviceEntries(db, device.deviceId, (entry) => ({
+    ...entry,
+    relayState: mqttPublished ? optimisticRelayState : entry.relayState,
+    wifiConnected: mqttPublished ? true : entry.wifiConnected,
+    lastSeen: mqttPublished ? nowIso : entry.lastSeen,
+    lastReportAt: mqttPublished ? nowIso : entry.lastReportAt,
+    pendingCommand: action,
+    pendingCommandId: commandId,
+    pendingCommandAt: nowIso,
+    schedule: { ...normalizeSchedule(entry.schedule), lastRunKey: runKey },
+  }));
+  db.commandLogs.push({
+    id: `schedule_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+    type: "schedule-command",
+    deviceId: device.deviceId,
+    action,
+    commandId,
+    mqttPublished,
+    createdAt: nowIso,
+  });
+}
+
+function runDeviceSchedules() {
+  let db;
+  try {
+    db = readJson(DATA_FILE);
+  } catch (error) {
+    console.warn("Schedule read failed:", error.message);
+    return;
+  }
+  const now = new Date();
+  const hhmm = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Bangkok" });
+  const dateKey = now.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
+  const nowIso = now.toISOString();
+  const devices = db.userDevices.map(normalizeUserDevice).filter((device) => device.deviceType === "switch" && device.schedule.enabled);
+  let changed = false;
+  devices.forEach((device) => {
+    if (!dayMatchesSchedule(now, device.schedule.days)) return;
+    const action = device.schedule.onTime === hhmm ? "on" : device.schedule.offTime === hhmm ? "off" : "";
+    if (!action) return;
+    const runKey = `${dateKey}:${hhmm}:${action}`;
+    if (device.schedule.lastRunKey === runKey) return;
+    queueScheduledCommand(db, device, action, nowIso, runKey);
+    changed = true;
+  });
+  if (changed) writeJson(DATA_FILE, db);
 }
 
 function getDeviceStateForPolling(db, deviceId) {
@@ -850,6 +976,7 @@ const server = http.createServer(async (req, res) => {
         deviceId: registryRow.device_id,
         deviceName: body.deviceName || registryRow.device_name || registryRow.device_id,
         model: registryRow.model || "",
+        deviceType: body.deviceType || registryRow.device_type || registryRow.deviceType || "switch",
         deviceIp: registryRow.device_ip || "",
         httpToken: registryRow.http_token || "",
         relayState: registryRow.relay_state || "OFF",
@@ -860,6 +987,7 @@ const server = http.createServer(async (req, res) => {
         lastReportAt: "",
         wifiConnected: false,
         setupMode: false,
+        schedule: normalizeSchedule({}),
         createdAt: new Date().toISOString(),
       });
 
@@ -974,6 +1102,40 @@ const server = http.createServer(async (req, res) => {
           wifiConnected: computeOnline(device),
         },
       });
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname.match(/^\/api\/devices\/[^/]+\/schedule$/)) {
+      const db = readJson(DATA_FILE);
+      const user = await getAuthUser(req, db);
+      if (!user) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const deviceId = decodeURIComponent(requestUrl.pathname.split("/")[3]);
+      const schedule = saveScheduleForDevice(db, user, deviceId, body.schedule || {}, body.deviceSnapshot);
+      if (!schedule) {
+        sendJson(res, 404, { error: "Device not found in this account" });
+        return;
+      }
+      writeJson(DATA_FILE, db);
+      try {
+        await updateRemoteSheetDeviceState({
+          deviceId,
+          schedule,
+          scheduleEnabled: schedule.enabled,
+          scheduleOnTime: schedule.onTime,
+          scheduleOffTime: schedule.offTime,
+          scheduleDays: schedule.days,
+          scheduleTimezone: schedule.timezone,
+          scheduleLastRunKey: schedule.lastRunKey,
+        });
+      } catch (error) {
+        console.warn("Remote device sheet schedule update failed:", error.message);
+      }
+      sendJson(res, 200, { ok: true, schedule });
       return;
     }
 
@@ -1099,3 +1261,5 @@ server.listen(PORT, HOST, () => {
 });
 
 startMqttBridge();
+setInterval(runDeviceSchedules, 30000);
+runDeviceSchedules();
