@@ -408,6 +408,9 @@ function normalizeUserDevice(entry) {
     lastReportAt: entry.lastReportAt || "",
     wifiConnected: entry.wifiConnected !== false,
     setupMode: Boolean(entry.setupMode),
+    temperatureC: entry.temperatureC ?? entry.temperature ?? "",
+    humidityPercent: entry.humidityPercent ?? entry.humidity ?? "",
+    sensorReadAt: entry.sensorReadAt || "",
     schedule,
     scheduleEnabled: schedule.enabled,
     scheduleOnTime: schedule.onTime,
@@ -445,6 +448,9 @@ function normalizeSheetDevice(user, entry) {
     deviceIp: entry.deviceIp || entry.device_ip || "",
     httpToken: entry.httpToken || entry.http_token || "",
     relayState: entry.relayState || entry.relay_state || "OFF",
+    temperatureC: entry.temperatureC ?? entry.temperature ?? "",
+    humidityPercent: entry.humidityPercent ?? entry.humidity ?? "",
+    sensorReadAt: entry.sensorReadAt || "",
     pendingCommand: entry.pendingCommand || "",
     pendingCommandId: entry.pendingCommandId || "",
     pendingCommandAt: entry.pendingCommandAt || "",
@@ -659,6 +665,10 @@ function applyDeviceHeartbeat(db, payload) {
   const ssid = payload.ssid || "";
   const appliedCommandId = payload.appliedCommandId || "";
   const action = payload.action || "";
+  const temperatureC = Number(payload.temperatureC);
+  const humidityPercent = Number(payload.humidityPercent);
+  const hasTemperature = Number.isFinite(temperatureC);
+  const hasHumidity = Number.isFinite(humidityPercent);
 
   updateDeviceEntries(db, payload.deviceId, (entry) => {
     const next = {
@@ -670,6 +680,9 @@ function applyDeviceHeartbeat(db, payload) {
       ssid,
       lastSeen: nowIso,
       lastReportAt: nowIso,
+      temperatureC: hasTemperature ? temperatureC : entry.temperatureC,
+      humidityPercent: hasHumidity ? humidityPercent : entry.humidityPercent,
+      sensorReadAt: hasTemperature || hasHumidity ? nowIso : entry.sensorReadAt,
     };
 
     if (appliedCommandId && entry.pendingCommandId === appliedCommandId) {
@@ -691,6 +704,8 @@ function applyDeviceHeartbeat(db, payload) {
     stationIp,
     createdAt: nowIso,
     appliedCommandId,
+    temperatureC: hasTemperature ? temperatureC : undefined,
+    humidityPercent: hasHumidity ? humidityPercent : undefined,
   });
 }
 
@@ -754,6 +769,9 @@ async function handleMqttStateMessage(topic, message) {
       setupMode: Boolean(payload.setupMode),
       lastSeen: new Date().toISOString(),
       lastReportAt: new Date().toISOString(),
+      temperatureC: Number.isFinite(Number(payload.temperatureC)) ? Number(payload.temperatureC) : undefined,
+      humidityPercent: Number.isFinite(Number(payload.humidityPercent)) ? Number(payload.humidityPercent) : undefined,
+      sensorReadAt: Number.isFinite(Number(payload.temperatureC)) || Number.isFinite(Number(payload.humidityPercent)) ? new Date().toISOString() : undefined,
     });
   } catch (error) {
     console.warn("Remote device sheet MQTT state update failed:", error.message);
@@ -1042,8 +1060,14 @@ const server = http.createServer(async (req, res) => {
       }
 
       const action = String(body.action || "").toLowerCase();
-      if (!["on", "off", "toggle"].includes(action)) {
-        sendJson(res, 400, { error: "Action must be on, off, or toggle" });
+      if (!["on", "off", "toggle", "read-sensor"].includes(action)) {
+        sendJson(res, 400, { error: "Unsupported device action" });
+        return;
+      }
+
+      const isSensorRead = action === "read-sensor";
+      if (isSensorRead && inferDeviceType(device) === "switch") {
+        sendJson(res, 400, { error: "This device is not registered as a sensor" });
         return;
       }
 
@@ -1051,7 +1075,7 @@ const server = http.createServer(async (req, res) => {
       const mqttPublished = publishMqttCommand(deviceId, commandId, action);
       const nowIso = new Date().toISOString();
       const previousRelayState = normalizeUserDevice(device).relayState;
-      const optimisticRelayState =
+      const optimisticRelayState = isSensorRead ? previousRelayState :
         action === "on" ? "ON" : action === "off" ? "OFF" : previousRelayState === "ON" ? "OFF" : "ON";
       updateDeviceEntries(db, deviceId, (entry) => ({
         ...entry,
@@ -1236,6 +1260,9 @@ const server = http.createServer(async (req, res) => {
           setupMode: Boolean(body.setupMode),
           lastSeen: new Date().toISOString(),
           lastReportAt: new Date().toISOString(),
+          temperatureC: Number.isFinite(Number(body.temperatureC)) ? Number(body.temperatureC) : undefined,
+          humidityPercent: Number.isFinite(Number(body.humidityPercent)) ? Number(body.humidityPercent) : undefined,
+          sensorReadAt: Number.isFinite(Number(body.temperatureC)) || Number.isFinite(Number(body.humidityPercent)) ? new Date().toISOString() : undefined,
         });
       } catch (error) {
         console.warn("Remote device sheet report update failed:", error.message);
