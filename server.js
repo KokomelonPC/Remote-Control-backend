@@ -410,6 +410,8 @@ function normalizeUserDevice(entry) {
     setupMode: Boolean(entry.setupMode),
     temperatureC: entry.temperatureC ?? entry.temperature ?? "",
     humidityPercent: entry.humidityPercent ?? entry.humidity ?? "",
+    turbidityNtu: entry.turbidityNtu ?? entry.turbidity ?? "",
+    turbidityVoltage: entry.turbidityVoltage ?? "",
     sensorReadAt: entry.sensorReadAt || "",
     schedule,
     scheduleEnabled: schedule.enabled,
@@ -450,6 +452,8 @@ function normalizeSheetDevice(user, entry) {
     relayState: entry.relayState || entry.relay_state || "OFF",
     temperatureC: entry.temperatureC ?? entry.temperature ?? "",
     humidityPercent: entry.humidityPercent ?? entry.humidity ?? "",
+    turbidityNtu: entry.turbidityNtu ?? entry.turbidity ?? "",
+    turbidityVoltage: entry.turbidityVoltage ?? "",
     sensorReadAt: entry.sensorReadAt || "",
     pendingCommand: entry.pendingCommand || "",
     pendingCommandId: entry.pendingCommandId || "",
@@ -667,8 +671,12 @@ function applyDeviceHeartbeat(db, payload) {
   const action = payload.action || "";
   const temperatureC = Number(payload.temperatureC);
   const humidityPercent = Number(payload.humidityPercent);
+  const turbidityNtu = Number(payload.turbidityNtu);
+  const turbidityVoltage = Number(payload.turbidityVoltage);
   const hasTemperature = Number.isFinite(temperatureC);
   const hasHumidity = Number.isFinite(humidityPercent);
+  const hasTurbidity = Number.isFinite(turbidityNtu);
+  const hasTurbidityVoltage = Number.isFinite(turbidityVoltage);
 
   updateDeviceEntries(db, payload.deviceId, (entry) => {
     const next = {
@@ -682,7 +690,9 @@ function applyDeviceHeartbeat(db, payload) {
       lastReportAt: nowIso,
       temperatureC: hasTemperature ? temperatureC : entry.temperatureC,
       humidityPercent: hasHumidity ? humidityPercent : entry.humidityPercent,
-      sensorReadAt: hasTemperature || hasHumidity ? nowIso : entry.sensorReadAt,
+      turbidityNtu: hasTurbidity ? turbidityNtu : entry.turbidityNtu,
+      turbidityVoltage: hasTurbidityVoltage ? turbidityVoltage : entry.turbidityVoltage,
+      sensorReadAt: hasTemperature || hasHumidity || hasTurbidity ? nowIso : entry.sensorReadAt,
     };
 
     if (appliedCommandId && entry.pendingCommandId === appliedCommandId) {
@@ -706,6 +716,8 @@ function applyDeviceHeartbeat(db, payload) {
     appliedCommandId,
     temperatureC: hasTemperature ? temperatureC : undefined,
     humidityPercent: hasHumidity ? humidityPercent : undefined,
+    turbidityNtu: hasTurbidity ? turbidityNtu : undefined,
+    turbidityVoltage: hasTurbidityVoltage ? turbidityVoltage : undefined,
   });
 }
 
@@ -771,7 +783,9 @@ async function handleMqttStateMessage(topic, message) {
       lastReportAt: new Date().toISOString(),
       temperatureC: Number.isFinite(Number(payload.temperatureC)) ? Number(payload.temperatureC) : undefined,
       humidityPercent: Number.isFinite(Number(payload.humidityPercent)) ? Number(payload.humidityPercent) : undefined,
-      sensorReadAt: Number.isFinite(Number(payload.temperatureC)) || Number.isFinite(Number(payload.humidityPercent)) ? new Date().toISOString() : undefined,
+      turbidityNtu: Number.isFinite(Number(payload.turbidityNtu)) ? Number(payload.turbidityNtu) : undefined,
+      turbidityVoltage: Number.isFinite(Number(payload.turbidityVoltage)) ? Number(payload.turbidityVoltage) : undefined,
+      sensorReadAt: Number.isFinite(Number(payload.temperatureC)) || Number.isFinite(Number(payload.humidityPercent)) || Number.isFinite(Number(payload.turbidityNtu)) ? new Date().toISOString() : undefined,
     });
   } catch (error) {
     console.warn("Remote device sheet MQTT state update failed:", error.message);
@@ -1262,7 +1276,9 @@ const server = http.createServer(async (req, res) => {
           lastReportAt: new Date().toISOString(),
           temperatureC: Number.isFinite(Number(body.temperatureC)) ? Number(body.temperatureC) : undefined,
           humidityPercent: Number.isFinite(Number(body.humidityPercent)) ? Number(body.humidityPercent) : undefined,
-          sensorReadAt: Number.isFinite(Number(body.temperatureC)) || Number.isFinite(Number(body.humidityPercent)) ? new Date().toISOString() : undefined,
+          turbidityNtu: Number.isFinite(Number(body.turbidityNtu)) ? Number(body.turbidityNtu) : undefined,
+          turbidityVoltage: Number.isFinite(Number(body.turbidityVoltage)) ? Number(body.turbidityVoltage) : undefined,
+          sensorReadAt: Number.isFinite(Number(body.temperatureC)) || Number.isFinite(Number(body.humidityPercent)) || Number.isFinite(Number(body.turbidityNtu)) ? new Date().toISOString() : undefined,
         });
       } catch (error) {
         console.warn("Remote device sheet report update failed:", error.message);
