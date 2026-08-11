@@ -28,6 +28,7 @@ const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "myshop-c3983";
 const FIREBASE_CERT_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 let firebaseCertCache = { expiresAt: 0, certs: {} };
 let mqttClient = null;
+const sensorHistoryBuckets = new Map();
 
 function ensureFile(filePath, fallbackContent) {
   const dir = path.dirname(filePath);
@@ -558,6 +559,80 @@ async function updateRemoteSheetDeviceState(device) {
   });
 }
 
+async function appendRemoteSensorHistory(payload) {
+  if (!REMOTE_SHEET_API_URL) return null;
+  const sensorKeys = ["temperatureC", "humidityPercent", "turbidityNtu", "pH", "batteryVoltage", "solarVoltage"];
+  if (!sensorKeys.some((key) => Number.isFinite(Number(payload[key])))) return null;
+  const deviceId = String(payload.deviceId || "").trim().toUpperCase();
+  const sampleBucket = Math.floor(Date.now() / 600000);
+  if (!deviceId || sensorHistoryBuckets.get(deviceId) === sampleBucket) return null;
+  return callRemoteSheet({
+    action: "appendSensorHistory",
+    measurement: {
+      deviceId,
+      recordedAt: new Date().toISOString(),
+      temperatureC: payload.temperatureC,
+      humidityPercent: payload.humidityPercent,
+      turbidityNtu: payload.turbidityNtu,
+      turbidityVoltage: payload.turbidityVoltage,
+      pH: payload.pH,
+      batteryVoltage: payload.batteryVoltage,
+      solarVoltage: payload.solarVoltage,
+      calibrationVersion: payload.calibrationVersion || "uncalibrated",
+    },
+  }).then((result) => {
+    sensorHistoryBuckets.set(deviceId, sampleBucket);
+    return result;
+  });
+}
+
+async function loadRemoteSensorHistory(user, deviceId, startAt, endAt) {
+  if (!REMOTE_SHEET_API_URL) return [];
+  const data = await callRemoteSheet({
+    action: "getSensorHistory",
+    ...userSheetIdentity(user),
+    deviceId,
+    startAt,
+    endAt,
+  });
+  return Array.isArray(data.measurements) ? data.measurements : [];
+}
+
+function aggregateSensorHistory(measurements, group) {
+  const intervalMs = group === "1d" ? 86400000 : group === "1h" ? 3600000 : 600000;
+  const timezoneOffsetMs = group === "1d" ? 7 * 3600000 : 0;
+  const fields = ["temperatureC", "humidityPercent", "turbidityNtu", "turbidityVoltage", "pH", "batteryVoltage", "solarVoltage"];
+  const buckets = new Map();
+
+  measurements.forEach((measurement) => {
+    const timestamp = new Date(measurement.recordedAt).getTime();
+    if (!Number.isFinite(timestamp)) return;
+    const bucketMs = Math.floor((timestamp + timezoneOffsetMs) / intervalMs) * intervalMs - timezoneOffsetMs;
+    const bucket = buckets.get(bucketMs) || { recordedAt: new Date(bucketMs).toISOString(), values: {} };
+    fields.forEach((field) => {
+      if (measurement[field] === "" || measurement[field] === null || measurement[field] === undefined) return;
+      const value = Number(measurement[field]);
+      if (!Number.isFinite(value)) return;
+      const accumulator = bucket.values[field] || { total: 0, count: 0, min: value, max: value };
+      accumulator.total += value;
+      accumulator.count += 1;
+      accumulator.min = Math.min(accumulator.min, value);
+      accumulator.max = Math.max(accumulator.max, value);
+      bucket.values[field] = accumulator;
+    });
+    buckets.set(bucketMs, bucket);
+  });
+
+  return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, bucket]) => {
+    const point = { recordedAt: bucket.recordedAt };
+    fields.forEach((field) => {
+      const value = bucket.values[field];
+      point[field] = value && value.count ? Number((value.total / value.count).toFixed(3)) : null;
+    });
+    return point;
+  });
+}
+
 function updateDeviceEntries(db, deviceId, updater) {
   let changed = false;
   db.userDevices = db.userDevices.map((entry) => {
@@ -787,6 +862,7 @@ async function handleMqttStateMessage(topic, message) {
       turbidityVoltage: Number.isFinite(Number(payload.turbidityVoltage)) ? Number(payload.turbidityVoltage) : undefined,
       sensorReadAt: Number.isFinite(Number(payload.temperatureC)) || Number.isFinite(Number(payload.humidityPercent)) || Number.isFinite(Number(payload.turbidityNtu)) ? new Date().toISOString() : undefined,
     });
+    await appendRemoteSensorHistory(payload);
   } catch (error) {
     console.warn("Remote device sheet MQTT state update failed:", error.message);
   }
@@ -880,6 +956,39 @@ const server = http.createServer(async (req, res) => {
         mqttConnected: Boolean(mqttClient && mqttClient.connected),
         remoteSheetConfigured: Boolean(REMOTE_SHEET_API_URL),
       });
+      return;
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/sensor-history") {
+      const db = readJson(DATA_FILE);
+      const user = await getAuthUser(req, db);
+      if (!user) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      const deviceId = String(requestUrl.searchParams.get("deviceId") || "").trim().toUpperCase();
+      const group = String(requestUrl.searchParams.get("group") || "10m").toLowerCase();
+      const defaultDays = group === "1d" ? 90 : group === "1h" ? 7 : 1;
+      const days = Math.min(365, Math.max(1, Number(requestUrl.searchParams.get("days")) || defaultDays));
+      if (!deviceId || !["10m", "1h", "1d"].includes(group)) {
+        sendJson(res, 400, { error: "deviceId and a valid group (10m, 1h, 1d) are required" });
+        return;
+      }
+      const endAt = new Date();
+      const startAt = new Date(endAt.getTime() - days * 86400000);
+      try {
+        const measurements = await loadRemoteSensorHistory(user, deviceId, startAt.toISOString(), endAt.toISOString());
+        sendJson(res, 200, {
+          deviceId,
+          group,
+          startAt: startAt.toISOString(),
+          endAt: endAt.toISOString(),
+          points: aggregateSensorHistory(measurements, group),
+        });
+      } catch (error) {
+        console.warn("Sensor history load failed:", error.message);
+        sendJson(res, 502, { error: "Unable to load sensor history" });
+      }
       return;
     }
 
@@ -1280,6 +1389,7 @@ const server = http.createServer(async (req, res) => {
           turbidityVoltage: Number.isFinite(Number(body.turbidityVoltage)) ? Number(body.turbidityVoltage) : undefined,
           sensorReadAt: Number.isFinite(Number(body.temperatureC)) || Number.isFinite(Number(body.humidityPercent)) || Number.isFinite(Number(body.turbidityNtu)) ? new Date().toISOString() : undefined,
         });
+        await appendRemoteSensorHistory(body);
       } catch (error) {
         console.warn("Remote device sheet report update failed:", error.message);
       }
