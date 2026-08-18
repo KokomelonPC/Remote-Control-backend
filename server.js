@@ -996,14 +996,26 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && requestUrl.pathname === "/api/public/sensor-history") {
       const deviceId = String(requestUrl.searchParams.get("deviceId") || "").trim().toUpperCase();
       const group = String(requestUrl.searchParams.get("group") || "10m").toLowerCase();
-      const defaultDays = group === "1d" ? 90 : group === "1h" ? 7 : 1;
-      const days = Math.min(365, Math.max(1, Number(requestUrl.searchParams.get("days")) || defaultDays));
       if (deviceId !== "ESP32-0004" || !["10m", "1h", "1d"].includes(group)) {
         sendJson(res, 404, { error: "Public sensor not found" });
         return;
       }
-      const endAt = new Date();
-      const startAt = new Date(endAt.getTime() - days * 86400000);
+      const requestedStart = requestUrl.searchParams.get("startAt");
+      const requestedEnd = requestUrl.searchParams.get("endAt");
+      const endAt = requestedEnd ? new Date(requestedEnd) : new Date();
+      const startAt = requestedStart ? new Date(requestedStart) : new Date(endAt.getTime() - 86400000);
+      if (!Number.isFinite(startAt.getTime()) || !Number.isFinite(endAt.getTime())) {
+        sendJson(res, 400, { error: "Invalid startAt or endAt" });
+        return;
+      }
+      if (startAt >= endAt) {
+        sendJson(res, 400, { error: "Start date must be before end date" });
+        return;
+      }
+      if (endAt.getTime() - startAt.getTime() > 365 * 86400000) {
+        sendJson(res, 400, { error: "Date range cannot exceed 365 days" });
+        return;
+      }
       try {
         const data = await callRemoteSheet({
           action: "getPublicSensorHistory",
