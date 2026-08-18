@@ -17,7 +17,8 @@ const WEB_ROOT = path.join(__dirname, "public");
 const DATA_FILE = path.join(__dirname, "data", "db.json");
 const SHEET_CACHE_FILE = path.join(__dirname, "data", "registry.json");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
-const REMOTE_SHEET_API_URL = process.env.REMOTE_SHEET_API_URL || "";
+const REMOTE_SHEET_API_URL = process.env.REMOTE_SHEET_API_URL ||
+  "https://script.google.com/macros/s/AKfycbzzFLMKiPR-b4AY50GurldAaP16qzThDEqWUyLlytVhHPHyQhfYmurTQgW1I_2UPJH1kA/exec";
 const DEVICE_ONLINE_WINDOW_MS = 45000;
 const MQTT_HOST = process.env.MQTT_HOST || "3342e4fb3c864571b97185e91ef66377.s1.eu.hivemq.cloud";
 const MQTT_PORT = Number(process.env.MQTT_PORT || 8883);
@@ -988,6 +989,40 @@ const server = http.createServer(async (req, res) => {
       } catch (error) {
         console.warn("Sensor history load failed:", error.message);
         sendJson(res, 502, { error: "Unable to load sensor history" });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/public/sensor-history") {
+      const deviceId = String(requestUrl.searchParams.get("deviceId") || "").trim().toUpperCase();
+      const group = String(requestUrl.searchParams.get("group") || "10m").toLowerCase();
+      const defaultDays = group === "1d" ? 90 : group === "1h" ? 7 : 1;
+      const days = Math.min(365, Math.max(1, Number(requestUrl.searchParams.get("days")) || defaultDays));
+      if (deviceId !== "ESP32-0004" || !["10m", "1h", "1d"].includes(group)) {
+        sendJson(res, 404, { error: "Public sensor not found" });
+        return;
+      }
+      const endAt = new Date();
+      const startAt = new Date(endAt.getTime() - days * 86400000);
+      try {
+        const data = await callRemoteSheet({
+          action: "getPublicSensorHistory",
+          deviceId,
+          startAt: startAt.toISOString(),
+          endAt: endAt.toISOString(),
+        });
+        const measurements = Array.isArray(data.measurements) ? data.measurements : [];
+        sendJson(res, 200, {
+          deviceId,
+          deviceName: "Gate Temp4",
+          group,
+          startAt: startAt.toISOString(),
+          endAt: endAt.toISOString(),
+          points: aggregateSensorHistory(measurements, group),
+        });
+      } catch (error) {
+        console.warn("Public sensor history load failed:", error.message);
+        sendJson(res, 502, { error: "Unable to load public sensor history" });
       }
       return;
     }
