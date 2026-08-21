@@ -1026,7 +1026,8 @@ const server = http.createServer(async (req, res) => {
         const measurements = Array.isArray(data.measurements) ? data.measurements : [];
         sendJson(res, 200, {
           deviceId,
-          deviceName: "Gate Temp4",
+          deviceName: data.deviceName || deviceId,
+          sensorLocation: data.sensorLocation || "",
           group,
           startAt: startAt.toISOString(),
           endAt: endAt.toISOString(),
