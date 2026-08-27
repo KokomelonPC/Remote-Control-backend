@@ -1028,6 +1028,7 @@ const server = http.createServer(async (req, res) => {
           deviceId,
           deviceName: data.deviceName || deviceId,
           sensorLocation: data.sensorLocation || "",
+          turbidityFactor: Number(data.turbidityFactor) >= 0.0001 && Number(data.turbidityFactor) <= 100 ? Number(data.turbidityFactor) : 1,
           group,
           startAt: startAt.toISOString(),
           endAt: endAt.toISOString(),
