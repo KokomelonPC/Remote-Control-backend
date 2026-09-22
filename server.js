@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 const crypto = require("crypto");
+const { validateSample, recordSample } = require("./lora");
 let mqtt = null;
 
 try {
@@ -15,6 +16,7 @@ const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || "0.0.0.0";
 const WEB_ROOT = path.join(__dirname, "public");
 const DATA_FILE = path.join(__dirname, "data", "db.json");
+const LORA_FILE = path.join(__dirname, "data", "lora.json");
 const SHEET_CACHE_FILE = path.join(__dirname, "data", "registry.json");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
 const REMOTE_SHEET_API_URL = process.env.REMOTE_SHEET_API_URL ||
@@ -67,6 +69,8 @@ ensureFile(SHEET_CACHE_FILE, {
     },
   ],
 });
+
+ensureFile(LORA_FILE, { loraReadings: {} });
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -1407,6 +1411,40 @@ const server = http.createServer(async (req, res) => {
         action: state.pendingCommand,
         relay: state.relayState === "ON",
       });
+      return;
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/device/lora") {
+      const body = await parseBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        sendJson(res, 400, { error: "Invalid LoRa sample" }); return;
+      }
+      const rows = await loadRegistryRows();
+      if (!findRegistryRow(rows, body.deviceId, body.deviceSecret)) {
+        sendJson(res, 401, { error: "Device authentication failed" });
+        return;
+      }
+      const sample = validateSample(body);
+      if (!sample) {
+        sendJson(res, 400, { error: "Invalid LoRa sample" });
+        return;
+      }
+      const readings = readJson(LORA_FILE);
+      const updated = recordSample(readings, body.deviceId, sample);
+      if (updated) writeJson(LORA_FILE, readings);
+      sendJson(res, 200, { ok: true, updated });
+      return;
+    }
+
+    if (req.method === "GET" && /^\/api\/devices\/[^/]+\/lora$/.test(requestUrl.pathname)) {
+      const db = readJson(DATA_FILE);
+      const user = await getAuthUser(req, db);
+      if (!user) { sendJson(res, 401, { error: "Unauthorized" }); return; }
+      const deviceId = decodeURIComponent(requestUrl.pathname.split("/")[3]);
+      if (!db.userDevices.some(d => d.userId === user.id && d.deviceId === deviceId)) {
+        sendJson(res, 404, { error: "Device not found in this account" }); return;
+      }
+      sendJson(res, 200, { sample: readJson(LORA_FILE).loraReadings?.[deviceId] || null });
       return;
     }
 
