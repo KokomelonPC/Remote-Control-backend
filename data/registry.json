@@ -56,6 +56,19 @@
       "relay_state": "OFF",
       "last_seen": "",
       "registered_at": "2026-08-04"
+    },
+    {
+      "device_id": "LORA-0001",
+      "device_secret": "0a60fd2a79db395f27e8ea6aaf8a3026f70be93e1a065821",
+      "device_name": "LoRa Test Gateway",
+      "model": "lora-gateway",
+      "device_type": "lora-gateway",
+      "status": "active",
+      "device_ip": "",
+      "http_token": "",
+      "relay_state": "OFF",
+      "last_seen": "",
+      "registered_at": "2026-09-22"
     }
   ]
 }
