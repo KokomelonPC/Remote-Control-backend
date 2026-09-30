@@ -8,7 +8,10 @@ function validateSample(body) {
       typeof body.snr !== "number" || !Number.isFinite(body.snr) || Math.abs(body.snr) > 100 ||
       !integer(body.ageMs) || body.ageMs > 300000) return null;
   return { session: body.session, sequence: body.sequence, value: body.value,
-    rssi: body.rssi, snr: body.snr, ageMs: body.ageMs };
+    rssi: body.rssi, snr: body.snr, ageMs: body.ageMs,
+    tankLevel: Number.isFinite(body.tankLevel) ? body.tankLevel : body.value,
+    tankMax: Number.isFinite(body.tankMax) ? body.tankMax : 10000,
+    pumpMask: Number.isInteger(body.pumpMask) ? body.pumpMask & 15 : 0 };
 }
 
 function recordSample(db, deviceId, sample, now = Date.now()) {
