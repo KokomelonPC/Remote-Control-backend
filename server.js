@@ -1448,6 +1448,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && /^\/api\/public\/scada\/[^/]+$/.test(requestUrl.pathname)) {
+      const deviceId = decodeURIComponent(requestUrl.pathname.split("/")[4]);
+      if (deviceId !== "LORA-0001") {
+        sendJson(res, 404, { error: "Public SCADA device not found" });
+        return;
+      }
+      const sample = readJson(LORA_FILE).loraReadings?.[deviceId] || null;
+      sendJson(res, 200, { sample });
+      return;
+    }
+
     if (req.method === "POST" && requestUrl.pathname === "/api/device/report") {
       const body = await parseBody(req);
       const rows = await loadRegistryRows();
