@@ -11,7 +11,10 @@ function validateSample(body) {
     rssi: body.rssi, snr: body.snr, ageMs: body.ageMs,
     tankLevel: Number.isFinite(body.tankLevel) ? body.tankLevel : body.value,
     tankMax: Number.isFinite(body.tankMax) ? body.tankMax : 10000,
-    pumpMask: Number.isInteger(body.pumpMask) ? body.pumpMask & 15 : 0 };
+    pumpMask: Number.isInteger(body.pumpMask) && body.pumpMask >= 0 && body.pumpMask <= 15 ? body.pumpMask : null,
+    pumpKnownMask: Object.prototype.hasOwnProperty.call(body, 'pumpKnownMask')
+      ? (Number.isInteger(body.pumpKnownMask) && body.pumpKnownMask >= 0 && body.pumpKnownMask <= 15 ? body.pumpKnownMask : 0)
+      : (Number.isInteger(body.pumpMask) && body.pumpMask >= 0 && body.pumpMask <= 15 ? 15 : 0) };
 }
 
 function recordSample(db, deviceId, sample, now = Date.now()) {
