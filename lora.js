@@ -1,6 +1,7 @@
 // Latest sample only: separate from sensor history and relay state.
 function validateSample(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  if (body.sourceId !== undefined && body.sourceId !== 1 && body.sourceId !== 2) return null;
   const integer = (v) => Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
   if (!integer(body.session) || !integer(body.sequence) ||
       typeof body.value !== "number" || !Number.isFinite(body.value) || Math.abs(body.value) > 1000000 ||
@@ -26,17 +27,30 @@ function validateSample(body) {
       result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key === 'cityPressure' ? 100 : 1000000) ? body[key] : null;
     }
   }
+  if (body.sourceId !== undefined) result.sourceId = body.sourceId;
+  if (body.sourceId === 2) {
+    result.tankKnown = false;
+    const mask = v => Number.isInteger(v) && v >= 0 && v <= 3;
+    result.pumpMask = mask(body.pumpMask) ? body.pumpMask : null;
+    result.maintenanceMask = mask(body.maintenanceMask) ? body.maintenanceMask : 0;
+    result.pumpKnownMask = mask(body.pumpKnownMask) && mask(body.maintenanceMask) && result.pumpMask !== null &&
+      !(result.pumpMask & ~body.pumpKnownMask) && !(result.maintenanceMask & ~body.pumpKnownMask) && !(result.pumpMask & result.maintenanceMask) ? body.pumpKnownMask : 0;
+    for (const key of ['rawLevel', 'banLat1Pressure', 'banLat1Flow']) {
+      result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key === 'banLat1Flow' ? 1000000 : 100) ? body[key] : null;
+    }
+  }
   return result;
 }
 
 function recordSample(db, deviceId, sample, now = Date.now()) {
   db.loraReadings ||= {};
-  const previous = db.loraReadings[deviceId];
+  const storageKey = sample.sourceId === 2 ? `${deviceId}:2` : deviceId;
+  const previous = db.loraReadings[storageKey];
   if (previous && previous.session === sample.session) {
     const delta = (sample.sequence - previous.sequence) >>> 0;
     if (delta === 0 || delta >= 0x80000000) return false;
   }
-  db.loraReadings[deviceId] = { ...sample, deviceId,
+  db.loraReadings[storageKey] = { ...sample, deviceId,
     receivedAt: new Date(now - sample.ageMs).toISOString(),
     uploadedAt: new Date(now).toISOString() };
   return true;

@@ -1444,7 +1444,10 @@ const server = http.createServer(async (req, res) => {
       if (!db.userDevices.some(d => d.userId === user.id && d.deviceId === deviceId)) {
         sendJson(res, 404, { error: "Device not found in this account" }); return;
       }
-      sendJson(res, 200, { sample: readJson(LORA_FILE).loraReadings?.[deviceId] || null });
+      const source = requestUrl.searchParams.get('sourceId') || '1';
+      if (!['1', '2'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
+      const storageKey = source === '2' ? `${deviceId}:2` : deviceId;
+      sendJson(res, 200, { sample: readJson(LORA_FILE).loraReadings?.[storageKey] || null });
       return;
     }
 
@@ -1454,7 +1457,10 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 404, { error: "Public SCADA device not found" });
         return;
       }
-      const sample = readJson(LORA_FILE).loraReadings?.[deviceId] || null;
+      const source = requestUrl.searchParams.get('sourceId') || '1';
+      if (!['1', '2'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
+      const storageKey = source === '2' ? `${deviceId}:2` : deviceId;
+      const sample = readJson(LORA_FILE).loraReadings?.[storageKey] || null;
       sendJson(res, 200, { sample });
       return;
     }
