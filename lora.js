@@ -7,7 +7,7 @@ function validateSample(body) {
       !Number.isInteger(body.rssi) || body.rssi < -200 || body.rssi > 20 ||
       typeof body.snr !== "number" || !Number.isFinite(body.snr) || Math.abs(body.snr) > 100 ||
       !integer(body.ageMs) || body.ageMs > 300000) return null;
-  return { session: body.session, sequence: body.sequence, value: body.value,
+  const result = { session: body.session, sequence: body.sequence, value: body.value,
     rssi: body.rssi, snr: body.snr, ageMs: body.ageMs,
     tankLevel: Number.isFinite(body.tankLevel) ? body.tankLevel : body.value,
     tankMax: Number.isFinite(body.tankMax) ? body.tankMax : 10000,
@@ -15,6 +15,18 @@ function validateSample(body) {
     pumpKnownMask: Object.prototype.hasOwnProperty.call(body, 'pumpKnownMask')
       ? (Number.isInteger(body.pumpKnownMask) && body.pumpKnownMask >= 0 && body.pumpKnownMask <= 15 ? body.pumpKnownMask : 0)
       : (Number.isInteger(body.pumpMask) && body.pumpMask >= 0 && body.pumpMask <= 15 ? 15 : 0) };
+  if (Object.prototype.hasOwnProperty.call(body, 'tankKnown')) result.tankKnown = body.tankKnown === true;
+  if (Object.prototype.hasOwnProperty.call(body, 'highPumpMask')) {
+    const validMask = v => Number.isInteger(v) && v >= 0 && v <= 127;
+    result.highPumpMask = validMask(body.highPumpMask) ? body.highPumpMask : null;
+    result.highPumpKnownMask = validMask(body.highPumpKnownMask) && result.highPumpMask !== null && !(result.highPumpMask & ~body.highPumpKnownMask) ? body.highPumpKnownMask : 0;
+  }
+  for (const key of ['cityPressure', 'banLaemFlow', 'cityFlow', 'hatChaoFlow']) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key === 'cityPressure' ? 100 : 1000000) ? body[key] : null;
+    }
+  }
+  return result;
 }
 
 function recordSample(db, deviceId, sample, now = Date.now()) {
