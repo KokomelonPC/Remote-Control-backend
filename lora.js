@@ -1,4 +1,4 @@
-// Latest sample only: separate from sensor history and relay state.
+// Latest telemetry and a bounded 10-packet meter window, separate from relay state.
 function validateSample(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   if (body.sourceId !== undefined && body.sourceId !== 1 && body.sourceId !== 2) return null;
@@ -42,6 +42,47 @@ function validateSample(body) {
   return result;
 }
 
+function selectMeterGroup(points, key, tolerance = 0.05) {
+    const valid = points.filter(p => typeof p[key] === 'number' && Number.isFinite(p[key]) && p[key] >= 0 && p[key] <= 1000000).sort((a,b) => a[key]-b[key]);
+    let best = null, bestSpread = Infinity;
+    for (let start=0; start<valid.length; start++) {
+      for (let end=start+2; end<=valid.length; end++) {
+        const group=valid.slice(start,end), middle=Math.floor(group.length/2);
+        const median=group.length%2 ? group[middle][key] : (group[middle-1][key]+group[middle][key])/2;
+        if (!group.every(p=>Math.abs(p[key]-median)<=Math.abs(median)*tolerance+1e-9)) continue;
+        const spread=(group[group.length-1][key]-group[0][key])/(Math.abs(median)||1);
+        if (!best || group.length>best.length || (group.length===best.length && spread<bestSpread)) { best=group; bestSpread=spread; }
+      }
+    }
+    return best;
+  }
+
+// Stored with the latest sample in lora.json, including across process restarts.
+function filterMeters(previous, sample) {
+  const prior = previous?.meterFilter;
+  const window = [...(prior?.window || []), {
+    tankLevel: sample.tankKnown === false ? null : sample.tankLevel,
+    banLaemFlow: sample.banLaemFlow,
+    receivedAt: sample.receivedAt
+  }].slice(-10);
+  const meters = {};
+  for (const key of ['tankLevel', 'banLaemFlow']) {
+    const best = selectMeterGroup(window, key);
+    const latest = [...window].reverse().find(p => typeof p[key] === 'number' && Number.isFinite(p[key]) && p[key] >= 0 && p[key] <= 1000000);
+    const old = prior?.meters?.[key];
+    meters[key] = best ? {
+      value: best.reduce((sum,p)=>sum+p[key],0)/best.length,
+      acceptedAt: Math.max(...best.map(p=>Date.parse(p.receivedAt))),
+      matched: true, averaged: true, groupCount: best.length
+    } : old?.averaged ? { ...old, matched: false } : {
+      value: latest?.[key] ?? old?.value ?? null,
+      acceptedAt: latest ? Date.parse(latest.receivedAt) : old?.acceptedAt ?? null,
+      matched: false, averaged: false
+    };
+  }
+  return { version: 2, count: window.length, tolerance: 0.05, window, meters };
+}
+
 function recordSample(db, deviceId, sample, now = Date.now()) {
   db.loraReadings ||= {};
   const storageKey = sample.sourceId === 2 ? `${deviceId}:2` : deviceId;
@@ -53,6 +94,10 @@ function recordSample(db, deviceId, sample, now = Date.now()) {
   db.loraReadings[storageKey] = { ...sample, deviceId,
     receivedAt: new Date(now - sample.ageMs).toISOString(),
     uploadedAt: new Date(now).toISOString() };
+  if (sample.sourceId !== 2) {
+    const stored = db.loraReadings[storageKey];
+    stored.meterFilter = filterMeters(previous, stored);
+  }
   return true;
 }
 module.exports = { validateSample, recordSample };
