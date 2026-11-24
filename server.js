@@ -1461,7 +1461,7 @@ const server = http.createServer(async (req, res) => {
       if (!['1', '2', '3'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
       const storageKey = source !== '1' ? `${deviceId}:${source}` : deviceId;
       const sample = readJson(LORA_FILE).loraReadings?.[storageKey] || null;
-      sendJson(res, 200, { sample });
+      sendJson(res, 200, { sample, serverTime: Date.now() });
       return;
     }
 
