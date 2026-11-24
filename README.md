@@ -1,5 +1,18 @@
 # Remote Control Backend V1
 
+## LoRa numeric test gateway (No_6)
+
+Deploy `lora.js` alongside `server.js`. The new endpoints are:
+
+- `POST /api/device/lora`: device registry credentials plus `session`, `sequence`, `value`, `rssi`, `snr`, `ageMs`.
+- `GET /api/devices/:deviceId/lora`: requires the owning account's Bearer token.
+
+Latest readings are stored in the auto-created `data/lora.json`; keep this on persistent storage if readings must survive host redeploys. Duplicate packets do not refresh timestamps. This endpoint does not modify sensor history or relay state.
+
+The local registry and Apps Script include `LORA-0001` with a secret matching `03.Arduino/No_6_Send_Signal/LoRaReceiver/GatewayConfig.h`. If `SHEET_CSV_URL` is set, add the same device to that CSV registry as well. Deploy the updated Apps Script for the existing device-registration page. Upload `lora_monitor.html`, `lora_monitor.js` and the updated `remote_control.html` to the frontend host.
+
+Full Thai setup instructions: `03.Arduino/No_6_Send_Signal/README_TH.md` at the project root. Tests from the project root: `node --test 02.Backend/tests/lora.test.cjs 01.Web/tests/lora_monitor.test.cjs`.
+
 Backend prototype for the ESP32 remote control project.
 
 ## What It Does

@@ -1,7 +1,7 @@
 // Latest telemetry and a bounded 10-packet meter window, separate from relay state.
 function validateSample(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  if (body.sourceId !== undefined && body.sourceId !== 1 && body.sourceId !== 2) return null;
+  if (body.sourceId !== undefined && body.sourceId !== 1 && body.sourceId !== 2 && body.sourceId !== 3) return null;
   const integer = (v) => Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
   if (!integer(body.session) || !integer(body.sequence) ||
       typeof body.value !== "number" || !Number.isFinite(body.value) || Math.abs(body.value) > 1000000 ||
@@ -28,6 +28,16 @@ function validateSample(body) {
     }
   }
   if (body.sourceId !== undefined) result.sourceId = body.sourceId;
+  if (body.sourceId === 3) {
+    if (!['RUN', 'STOP', 'UNKNOWN'].includes(body.operation) ||
+        !Object.prototype.hasOwnProperty.call(body, 'lt3') ||
+        !Object.prototype.hasOwnProperty.call(body, 'volume')) return null;
+    result.tankKnown = false;
+    result.operation = ['RUN', 'STOP', 'UNKNOWN'].includes(body.operation) ? body.operation : 'UNKNOWN';
+    for (const key of ['lt3', 'volume']) {
+      result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key === 'lt3' ? 100 : 1000000) ? body[key] : null;
+    }
+  }
   if (body.sourceId === 2) {
     result.tankKnown = false;
     const mask = v => Number.isInteger(v) && v >= 0 && v <= 3;
@@ -85,7 +95,7 @@ function filterMeters(previous, sample) {
 
 function recordSample(db, deviceId, sample, now = Date.now()) {
   db.loraReadings ||= {};
-  const storageKey = sample.sourceId === 2 ? `${deviceId}:2` : deviceId;
+  const storageKey = sample.sourceId > 1 ? `${deviceId}:${sample.sourceId}` : deviceId;
   const previous = db.loraReadings[storageKey];
   if (previous && previous.session === sample.session) {
     const delta = (sample.sequence - previous.sequence) >>> 0;
@@ -94,7 +104,7 @@ function recordSample(db, deviceId, sample, now = Date.now()) {
   db.loraReadings[storageKey] = { ...sample, deviceId,
     receivedAt: new Date(now - sample.ageMs).toISOString(),
     uploadedAt: new Date(now).toISOString() };
-  if (sample.sourceId !== 2) {
+  if (!sample.sourceId || sample.sourceId === 1) {
     const stored = db.loraReadings[storageKey];
     stored.meterFilter = filterMeters(previous, stored);
   }

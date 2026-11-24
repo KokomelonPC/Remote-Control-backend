@@ -1445,8 +1445,8 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 404, { error: "Device not found in this account" }); return;
       }
       const source = requestUrl.searchParams.get('sourceId') || '1';
-      if (!['1', '2'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
-      const storageKey = source === '2' ? `${deviceId}:2` : deviceId;
+      if (!['1', '2', '3'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
+      const storageKey = source !== '1' ? `${deviceId}:${source}` : deviceId;
       sendJson(res, 200, { sample: readJson(LORA_FILE).loraReadings?.[storageKey] || null });
       return;
     }
@@ -1458,8 +1458,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const source = requestUrl.searchParams.get('sourceId') || '1';
-      if (!['1', '2'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
-      const storageKey = source === '2' ? `${deviceId}:2` : deviceId;
+      if (!['1', '2', '3'].includes(source)) { sendJson(res, 400, { error: 'Invalid sourceId' }); return; }
+      const storageKey = source !== '1' ? `${deviceId}:${source}` : deviceId;
       const sample = readJson(LORA_FILE).loraReadings?.[storageKey] || null;
       sendJson(res, 200, { sample });
       return;
