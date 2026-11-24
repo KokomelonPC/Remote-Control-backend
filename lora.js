@@ -37,6 +37,9 @@ function validateSample(body) {
     for (const key of ['lt3', 'volume']) {
       result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key === 'lt3' ? 100 : 1000000) ? body[key] : null;
     }
+    for (const key of ['beforeConductivity','beforePh','afterConductivity','afterPh']) {
+      result[key] = typeof body[key] === 'number' && Number.isFinite(body[key]) && body[key] >= 0 && body[key] <= (key.endsWith('Ph') ? 14 : 1000000) ? body[key] : null;
+    }
   }
   if (body.sourceId === 2) {
     result.tankKnown = false;

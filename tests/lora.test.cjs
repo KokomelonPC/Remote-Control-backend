@@ -132,12 +132,16 @@ test('two senders retain independent samples, duplicate tracking, and timestamps
 test('Mini uses its own source and preserves unknown readings without changing Ban Lat', async () => {
   const request=makeServer();
   const creds={deviceId:'LORA-0001',deviceSecret:'test-only'};
-  const mini={...sample,...creds,sourceId:3,operation:'RUN',lt3:1.27,volume:3178};
+  const mini={...sample,...creds,sourceId:3,operation:'RUN',lt3:1.27,volume:3178,beforeConductivity:157,beforePh:7.43,afterConductivity:9,afterPh:6.81};
   await request('POST','/api/device/lora',{...sample,...creds});
   assert.equal((await request('POST','/api/device/lora',mini)).body.updated,true);
   assert.equal((await request('POST','/api/device/lora',mini)).body.updated,false);
   let saved=(await request('GET','/api/public/scada/LORA-0001?sourceId=3')).body.sample;
   assert.equal(saved.lt3,1.27); assert.equal(saved.volume,3178); assert.equal(saved.operation,'RUN');
+  assert.equal(saved.beforeConductivity,157); assert.equal(saved.beforePh,7.43);
+  assert.equal(saved.afterConductivity,9); assert.equal(saved.afterPh,6.81);
+  const invalid=validateSample({...mini,beforePh:15,afterConductivity:'9'});
+  assert.equal(invalid.beforePh,null); assert.equal(invalid.afterConductivity,null);
   assert.equal(saved.tankKnown,false); assert.equal(saved.meterFilter,undefined);
   assert.equal((await request('GET','/api/public/scada/LORA-0001')).body.sample.value,sample.value);
   await request('POST','/api/device/lora',{...mini,sequence:2,operation:'UNKNOWN',lt3:null,volume:null});
